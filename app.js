@@ -73,7 +73,11 @@
   async function api(action, payload) {
     if (DEMO) {
       await new Promise(res => setTimeout(res, action === 'boot' ? 400 : 700));
-      if (action === 'boot') return JSON.parse(JSON.stringify(window.PRORAB_DEMO));
+      const role = (location.search.match(/demo=(\w+)/) || [])[1];
+      const pick = role === 'manager' ? window.PRORAB_DEMO_MANAGER : role === 'pto' ? window.PRORAB_DEMO_PTO : window.PRORAB_DEMO;
+      if (action === 'boot') return JSON.parse(JSON.stringify(pick));
+      if (action === 'ksg') return JSON.parse(JSON.stringify(window.PRORAB_DEMO_KSG));
+      if (action === 'remind') return { ok: true, sent: 2, names: ['Белов А.', 'Захаров М.'] };
       return { ok: true };
     }
     const res = await fetch(API + '?api=1', {
@@ -95,7 +99,7 @@
     render();
     try {
       S.d = await api('boot');
-      S.screen = S.d.role === 'foreman' ? 'home' : 'other';
+      S.screen = ROLE_HOME[S.d.role] || 'other';
     } catch (e) {
       S.screen = 'error';
       S.msg = e.message || 'Нет связи с сервером.';
@@ -190,8 +194,13 @@
 
   // ---------- Экраны
 
+  // Экран → его рисующая функция; экраны руководителя и ПТО добавляет office.js.
+  const screens = {};
+  // Куда ведёт «Назад» (кнопка Telegram) с экрана.
+  const parents = { report: 'home', finish: 'report' };
+  const ROLE_HOME = { foreman: 'home', manager: 'm-home', pto: 'p-check' };
+
   function render() {
-    const screens = { loading: viewLoading, error: viewError, other: viewOther, home: viewHome, report: viewReport, finish: viewFinish, done: viewDone };
     app.innerHTML = screens[S.screen]();
     bottomCache = S.screen === 'report' ? bottomHtml() : S.screen === 'finish' ? finishBottomHtml() : '';
     syncTelegram();
@@ -199,7 +208,7 @@
 
   function syncTelegram() {
     if (!tg) return;
-    const sub = S.screen === 'report' || S.screen === 'finish';
+    const sub = !!parents[S.screen];
     try {
       if (sub) tg.BackButton.show();
       else tg.BackButton.hide();
@@ -219,12 +228,24 @@
     return '<div class="screen"><div class="center"><h2>Здравствуйте, ' + esc(S.d.name) + '</h2><p>' + esc(S.d.message) + '</p></div></div>';
   }
 
+  /**
+   * Как обращаться: «Фамилия Имя Отчество» → «Имя Отчество», «Фамилия Имя» → «Имя».
+   * Имя руководителя и ПТО берётся из Telegram («Имя Фамилия») — тогда первое слово.
+   */
+  function callName(name, nameFirst) {
+    const w = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (w.length >= 3) return w[1] + ' ' + w[2];
+    if (w.length === 2 && /(вич|вна|ична|чна)$/i.test(w[1])) return w[0] + ' ' + w[1];
+    if (w.length === 2) return nameFirst ? w[0] : w[1];
+    return w[0] || '';
+  }
+  function hello() {
+    const h = new Date().getHours();
+    return h < 5 ? 'Доброй ночи' : h < 12 ? 'Доброе утро' : h < 17 ? 'Добрый день' : h < 23 ? 'Добрый вечер' : 'Доброй ночи';
+  }
+
   function viewHome() {
     const d = S.d;
-    const words = String(d.name).trim().split(/\s+/);
-    const first = words.length > 1 ? words[1] : words[0];
-    const h = new Date().getHours();
-    const hello = h < 5 ? 'Доброй ночи' : h < 12 ? 'Доброе утро' : h < 17 ? 'Добрый день' : h < 23 ? 'Добрый вечер' : 'Доброй ночи';
     const gap = d.progress.fact - d.progress.plan;
     const status = gap < -0.15 ? ['Отстаёт', 'behind'] : gap < -0.05 ? ['Риск', 'behind'] : ['В графике', 'ok'];
     const today = d.works.filter(w => isNow(w, d.today));
@@ -244,7 +265,7 @@
     }
 
     return '<div class="screen"><div class="pad">' +
-      '<div class="hello"><small>' + longDate(d.today) + '</small><h1>' + hello + ', ' + esc(first) + '</h1></div>' +
+      '<div class="hello"><small>' + longDate(d.today) + '</small><h1>' + hello() + ', ' + esc(callName(d.name)) + '</h1></div>' +
       '<div class="obj"><div class="obj-head"><div><div class="obj-kicker">' + (d.top ? 'Объект ' + esc(d.top) : 'Объект') + '</div>' +
       '<div class="obj-name">' + esc(d.object) + '</div></div><span class="chip ' + status[1] + '">' + status[0] + '</span></div>' +
       '<div class="obj-nums"><div><div class="big">' + pct(d.progress.fact) + '</div><small>готовность по факту</small></div>' +
@@ -460,13 +481,10 @@
   }
 
   function goBack() {
-    if (S.screen === 'finish') {
-      S.screen = 'report';
-      render();
-    } else if (S.screen === 'report') {
-      S.screen = 'home';
-      render();
-    }
+    if (!parents[S.screen]) return;
+    S.screen = parents[S.screen];
+    render();
+    window.scrollTo(0, 0);
   }
 
   const actions = {
@@ -510,6 +528,14 @@
     pminus: () => { S.r.people = String(Math.max(0, (Number(S.r.people) || 0) - 1)); saveDraft(); render(); },
     nocomment: () => { S.r.comment = ''; const t = app.querySelector('[data-comment]'); if (t) t.value = ''; saveDraft(); toast('Замечаний нет — так и запишу.'); },
     send: send,
+  };
+
+  Object.assign(screens, { loading: viewLoading, error: viewError, other: viewOther, home: viewHome, report: viewReport, finish: viewFinish, done: viewDone });
+
+  // Общее для office.js (экраны руководителя и ПТО).
+  window.PRORAB = {
+    S, screens, parents, actions, api, boot, render, toast, haptic, I, DEMO,
+    esc, round, num, parseNum, pct, isoAdd, longDate, shortDate, plural, callName, hello,
   };
 
   app.addEventListener('click', e => {
@@ -577,16 +603,19 @@
     } catch (e) { /* старые клиенты Telegram */ }
   }
 
-  if (DEMO) {
-    const s = document.createElement('script');
-    s.src = 'demo.js?v=1';
-    s.onload = boot;
-    document.body.appendChild(s);
-  } else if (!tg) {
-    S.screen = 'error';
-    S.msg = 'Это приложение открывается из Telegram — кнопкой «Открыть» в чате с ботом.';
-    render();
-  } else {
-    boot();
+  function start() {
+    if (DEMO) {
+      const s = document.createElement('script');
+      s.src = 'demo.js?v=3';
+      s.onload = boot;
+      document.body.appendChild(s);
+    } else if (!tg) {
+      S.screen = 'error';
+      S.msg = 'Это приложение открывается из Telegram — кнопкой «Открыть» в чате с ботом.';
+      render();
+    } else {
+      boot();
+    }
   }
+  setTimeout(start, 0);
 })();
